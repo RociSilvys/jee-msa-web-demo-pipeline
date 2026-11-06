@@ -99,7 +99,7 @@ stages:
         steps:
           - task: ManualValidation@0
             inputs:
-              notifyUsers: 'jefersonvillacis@hotmail.com'
+              notifyUsers: 'sil17200@hotmail.com'
               instructions: 'Aprobación requerida para ejecutar la fase de despliegue continuo en OpenShift Sandbox.'
               onTimeout: 'reject'
 
@@ -124,7 +124,7 @@ stages:
               oc login --token=$(OPENSHIFT_TOKEN) --server=$(OPENSHIFT_SERVER) --insecure-skip-tls-verify=true
 
               echo "=== 3. Seleccionando Proyecto ==="
-              oc project sil17200-dev
+              oc project sil17200-dev || { echo "##[error]No se pudo seleccionar el proyecto sil17200-dev"; exit 1; }
 
               echo "=== 4. Aplicando Manifiestos (Creando BuildConfig y Deployment) ==="
               oc apply -f helm/build-config.yaml
@@ -146,11 +146,48 @@ stages:
             displayName: 'Descarga CLI, Login y Despliegue Docker'
 
   # ==========================================
-  # STAGE 4: NOTIFICACIONES (NOTIFICATIONS)
+  # STAGE 4: SMOKE TEST (VALIDACIÓN POST-DESPLIEGUE)
+  # ==========================================
+  - stage: SmokeTest
+    displayName: 'Smoke Test'
+    dependsOn: CD
+    condition: succeeded()
+    jobs:
+      - job: verify_deployment
+        displayName: 'Verificar Despliegue'
+        steps:
+          - script: |
+              echo "=== 1. Instalando OpenShift CLI (oc) ==="
+              curl -LO https://mirror.openshift.com/pub/openshift-v4/clients/ocp/stable/openshift-client-linux.tar.gz
+              tar -xzf openshift-client-linux.tar.gz
+              sudo mv oc /usr/local/bin/
+
+              echo "=== 2. Autenticando en el Clúster ==="
+              oc login --token=$(OPENSHIFT_TOKEN) --server=$(OPENSHIFT_SERVER) --insecure-skip-tls-verify=true
+              oc project sil17200-dev || { echo "##[error]No se pudo seleccionar el proyecto sil17200-dev"; exit 1; }
+
+              echo "=== 3. Obteniendo URL de la Aplicación ==="
+              ROUTE_URL=$(oc get route jee-msa-web-demo-pipeline -o jsonpath='{.spec.host}')
+              echo "URL detectada: http://$ROUTE_URL"
+
+              echo "=== 4. Validando respuesta HTTP ==="
+              HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://$ROUTE_URL")
+              echo "Código de respuesta HTTP: $HTTP_STATUS"
+
+              if [ "$HTTP_STATUS" -ge 200 ] && [ "$HTTP_STATUS" -lt 400 ]; then
+                echo "✅ La aplicación respondió correctamente."
+              else
+                echo "##[error]❌ La aplicación no respondió correctamente (HTTP $HTTP_STATUS)."
+                exit 1
+              fi
+            displayName: 'Verificar que la App responde'
+
+  # ==========================================
+  # STAGE 5: NOTIFICACIONES (NOTIFICATIONS)
   # ==========================================
   - stage: Notifications
     displayName: 'Notificar'
-    dependsOn: [CI, Approval, CD]
+    dependsOn: [CI, Approval, CD, SmokeTest]
     condition: always()
     jobs:
       - job: send_status_email
